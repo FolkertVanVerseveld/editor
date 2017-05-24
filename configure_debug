@@ -1,0 +1,2 @@
+#!/bin/bash -e
+./configure -g -DDEBUG "$@"
