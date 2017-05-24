@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -47,10 +48,18 @@ static void bfile_close(struct bfile *f)
 	}
 }
 
+static int parse(const char *start, const char *end)
+{
+	size_t cmdlen = (size_t)(end - start);
+	printf("exec \"%s\" (%zu)\n", start, cmdlen);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	struct bfile file;
 	int ret;
+	char input[80];
 	if (argc != 2) {
 		fprintf(stderr, "usage: %s file\n", argc > 1 ? argv[0] : "editor");
 		return 1;
@@ -58,6 +67,22 @@ int main(int argc, char **argv)
 	ret = bfile_open(&file, argv[1], 0664);
 	if (ret)
 		return ret;
+	while (fgets(input, sizeof input, stdin)) {
+		char *start, *last, *end;
+		/* trim input before processing ignoring all whitespace */
+		for (start = input; isspace(*start); ++start)
+			;
+		for (end = start; *end; ++end)
+			;
+		for (last = end; last > start; --last)
+			if (!isspace(last[-1]))
+				break;
+		*last = '\0';
+		if (*start == 'q' && !start[1])
+			break;
+		if (parse(start, last) < 0)
+			fprintf(stderr, "? %s\n", start);
+	}
 	bfile_close(&file);
 	return 0;
 }
