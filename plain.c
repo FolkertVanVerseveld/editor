@@ -1,11 +1,12 @@
+#define _GNU_SOURCE
 #include <errno.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
-#include <fcntl.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -13,12 +14,27 @@
 #define BF_READONLY 1
 #define BF_ROWMAX 16
 
+#define SPACE_DELIM " \f\n\r\t\v"
+#define INPUT_BUFSZ 256
+
 static const char *help_editor =
-	"Line-based hex editor\n"
+	"Line-based editor\n"
 	"Commands:\n"
+	"a start data...     Poke data\n"
 	"g                   Show file info\n"
 	"m start [length]    Dump memory\n"
-	"q                   Quit editor";
+	"q                   Quit editor\n"
+	"t size              Truncate file";
+
+static const char *help_poke =
+	"a: start data...\n"
+	"  Poke data to START one number at a time. The space occupied by each\n"
+	"  number is round up to a power of two times 8. Example:\n"
+	"\n"
+	"    a 0 $ff %110011001 o400\n"
+	"\n"
+	"  These numbers take up 1, 2 and 2 bytes respectively (0 is the start\n"
+	"  address and therefore not included).";
 
 static const char *help_showinfo =
 	"g: g\n"
@@ -31,7 +47,11 @@ static const char *help_peek =
 
 static const char *help_quit =
 	"q: q\n"
-	"  Quit editor without saving changes.";
+	"  Quit editor and save changes.";
+
+static const char *help_truncate =
+	"t: t size\n"
+	"  Resize file to SIZE and zero new data if resized file is bigger.";
 
 /* binary file */
 static struct bfile {
@@ -118,6 +138,62 @@ static void bfile_peek(const struct bfile *f, uint64_t start, unsigned length)
 		putchar('\n');
 }
 
+static int bfile_truncate(struct bfile *f, uint64_t size)
+{
+	if (file.flags & BF_READONLY) {
+		fputs("Can't truncate: readonly file\n", stderr);
+		return 1;
+	}
+	/* ignore if same */
+	if (file.size == size)
+		return 0;
+	if (ftruncate(f->fd, size)) {
+		fprintf(stderr, "Can't truncate: %s\n", strerror(errno));
+		return 1;
+	}
+	size_t oldsize = f->size;
+	/* mremap ensures that data is kept intact even if it has been moved */
+	void *map = mremap(f->data, f->size, size, MREMAP_MAYMOVE);
+	if (map == MAP_FAILED) {
+		fprintf(stderr, "Can't remap: %s\n", strerror(errno));
+		return 1;
+	}
+	/* update mapping */
+	f->data = map;
+	f->size = size;
+	if (msync(f->data, size, MS_SYNC)) {
+		/*
+		 * journaling may not be supported by the underlying filesystem
+		 * try to revert to old state
+		 */
+		void *oldmap = mremap(f->data, size, oldsize, MREMAP_MAYMOVE);
+		if (oldmap != MAP_FAILED) {
+			f->data = oldmap;
+			f->size = oldsize;
+			fprintf(stderr,
+				"Can't sync with file, journaling may be unsupported.\n"
+				"Filesystems that do not support journaling are e.g.: fat, ext, nfts\n"
+				"Sync error: %s\n",
+				strerror(errno)
+			);
+			return 1;
+		}
+		/* give up, something is terribly broken */
+		fprintf(stderr,
+			"Can't sync with file, I/O broken: %s\n"
+			"Going into readonly mode!\n",
+			strerror(errno)
+		);
+		f->flags |= BF_READONLY;
+		return 1;
+	}
+	if (fstat(f->fd, &f->st)) {
+		fprintf(stderr, "Can't access %s: %s\n", f->name, strerror(errno));
+		return 1;
+	}
+	return 0;
+}
+
 static int parse_address(const char *str, uint64_t *address, uint64_t *mask)
 {
 	const char *base_str = "0123456789ABCDEF";
@@ -136,7 +212,7 @@ static int parse_address(const char *str, uint64_t *address, uint64_t *mask)
 		v *= base;
 		*mask *= base;
 		const char *pos = strchr(base_str, toupper(*ptr));
-		if (!pos)
+		if (!pos || pos >= base_str + base)
 			return 1;
 		v += (unsigned)(pos - base_str);
 		*mask += base - 1;
@@ -151,6 +227,9 @@ static int help(const char *start)
 	case '\0':
 		puts(help_editor);
 		break;
+	case 'a':
+		puts(help_poke);
+		break;
 	case 'g':
 		puts(help_showinfo);
 		break;
@@ -160,20 +239,112 @@ static int help(const char *start)
 	case 'q':
 		puts(help_quit);
 		break;
+	case 't':
+		puts(help_truncate);
+		break;
 	default:
 		return -1;
 	}
 	return 0;
 }
 
+static unsigned byte_count(uint64_t v)
+{
+	if (v > UINT32_MAX)
+		return 8;
+	if (v > UINT16_MAX)
+		return 4;
+	if (v > UINT8_MAX)
+		return 2;
+	return 1;
+}
+
+static int poke(char *start)
+{
+	char copy[INPUT_BUFSZ];
+	char *token, *saveptr, *str;
+	uint8_t *dest;
+	uint64_t addr, value, mask, size;
+	unsigned n = 0;
+	if (file.flags & BF_READONLY) {
+		fputs("Can't poke: readonly file\n", stderr);
+		return 1;
+	}
+	strcpy(copy, start);
+	/* first pass */
+	for (str = copy; ; str = NULL) {
+		token = strtok_r(str, SPACE_DELIM, &saveptr);
+		if (!token)
+			break;
+		switch (n++) {
+		case 0:
+			if (parse_address(token, &addr, &mask)) {
+				fputs("Bad address\n", stderr);
+				return 1;
+			}
+			break;
+		default:
+			if (parse_address(token, &value, &mask)) {
+				fprintf(stderr, "Bad value: %s\n", token);
+				return 1;
+			}
+			n += byte_count(value) - 1;
+			break;
+		}
+	}
+	if (n < 2) {
+		if (!n)
+			fputs("Missing address\n", stderr);
+		else
+			fputs("Missing data\n", stderr);
+		return 1;
+	}
+	--n;
+	size = file.size;
+	if (addr > size) {
+		uint64_t overflow = addr - size;
+		printf(
+			"Can't poke: %" PRIu64 " %s behind file\n",
+			overflow, overflow == 1 ? "byte" : "bytes"
+		);
+		return 1;
+	}
+	if (addr + n > size) {
+		uint64_t overflow = addr + n - size;
+		printf(
+			"Poke overflows by %" PRIu64 " %s\n",
+			overflow, overflow == 1 ? "byte" : "bytes"
+		);
+		return 1;
+	}
+	/* second pass */
+	for (dest = (uint8_t*)file.data + addr, str = start, n = 0; ; str = NULL) {
+		token = strtok_r(str, SPACE_DELIM, &saveptr);
+		if (!token)
+			break;
+		if (n++) {
+			unsigned bytes;
+			parse_address(token, &value, &mask);
+			bytes = byte_count(value);
+			switch (bytes) {
+			case 8: *((uint64_t*)dest) = (uint64_t)value; break;
+			case 4: *((uint32_t*)dest) = (uint32_t)value; break;
+			case 2: *((uint16_t*)dest) = (uint16_t)value; break;
+			case 1: *dest = (uint8_t)value; break;
+			}
+			dest += bytes;
+		}
+	}
+	return 0;
+}
+
 static int peek(char *start)
 {
-	const char *delim = " \f\n\r\t\v";
 	char *token, *saveptr, *str;
 	unsigned n = 0;
 	uint64_t addr, length = 16, mask;
 	for (str = start; ; str = NULL) {
-		token = strtok_r(str, delim, &saveptr);
+		token = strtok_r(str, SPACE_DELIM, &saveptr);
 		if (!token)
 			break;
 		switch (n++) {
@@ -206,6 +377,19 @@ static int peek(char *start)
 	return 0;
 }
 
+static int do_truncate(char *start)
+{
+	uint64_t size, mask;
+	char *arg;
+	for (arg = start; isspace(*arg); ++arg)
+		;
+	if (parse_address(arg, &size, &mask)) {
+		fputs("Bad filesize\n", stderr);
+		return 1;
+	}
+	return bfile_truncate(&file, size);
+}
+
 static int parse(char *start)
 {
 	char *op;
@@ -214,11 +398,15 @@ static int parse(char *start)
 	switch (*start) {
 	case '?':
 		return help(op);
+	case 'a':
+		return poke(op);
 	case 'g':
 		bfile_showinfo(&file);
 		break;
 	case 'm':
 		return peek(op);
+	case 't':
+		return do_truncate(op);
 	default:
 		return -1;
 	}
@@ -228,7 +416,7 @@ static int parse(char *start)
 int main(int argc, char **argv)
 {
 	int ret;
-	char input[80];
+	char input[INPUT_BUFSZ];
 	if (argc != 2) {
 		fprintf(stderr, "usage: %s file\n", argc > 1 ? argv[0] : "editor");
 		return 1;
