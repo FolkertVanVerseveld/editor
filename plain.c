@@ -21,6 +21,7 @@ static const char *help_editor =
 	"Line-based editor\n"
 	"Commands:\n"
 	"a start data...           Poke data\n"
+	"c dest src length         Copy data\n"
 	"g                         Show file info\n"
 	"h start[,length] data...  Hunt data\n"
 	"m start [length]          Dump memory\n"
@@ -36,6 +37,10 @@ static const char *help_poke =
 	"\n"
 	"  These numbers take up 1, 2 and 2 bytes respectively (0 is the start\n"
 	"  address and therefore not included).";
+
+static const char *help_copy =
+	"c: c dest src length\n"
+	"  Copy data from SRC to DEST. The areas may overlap.";
 
 static const char *help_showinfo =
 	"g: g\n"
@@ -238,6 +243,9 @@ static int help(const char *start)
 	case 'a':
 		puts(help_poke);
 		break;
+	case 'c':
+		puts(help_copy);
+		break;
 	case 'g':
 		puts(help_showinfo);
 		break;
@@ -346,6 +354,71 @@ static int poke(char *start)
 			dest += bytes;
 		}
 	}
+	return 0;
+}
+
+static int copy(char *start)
+{
+	char *token, *saveptr, *str;
+	uint8_t *dest, *src;
+	uint64_t from, to, mask, length, size;
+	unsigned n = 0;
+	for (str = start; ; str = NULL) {
+		token = strtok_r(str, SPACE_DELIM, &saveptr);
+		if (!token)
+			break;
+		switch (n++) {
+		case 0:
+			if (parse_address(token, &to, &mask)) {
+				fputs("Bad destination\n", stderr);
+				return 1;
+			}
+			break;
+		case 1:
+			if (parse_address(token, &from, &mask)) {
+				fputs("Bad source\n", stderr);
+				return 1;
+			}
+			break;
+		case 2:
+			if (parse_address(token, &length, &mask)) {
+				fputs("Bad length\n", stderr);
+				return 1;
+			}
+			break;
+		default:
+			fputs("Too many arguments\n", stderr);
+			return 1;
+		}
+	}
+	if (n != 3) {
+		switch (n) {
+		case  2: fputs("Missing length\n", stderr); break;
+		case  1: fputs("Missing source\n", stderr); break;
+		default: fputs("Missing destination\n", stderr); break;
+		}
+		return 1;
+	}
+	size = file.size;
+	if (from + length > size) {
+		uint64_t overflow = from + length - size;
+		printf(
+			"Source overflows by %" PRIu64 " %s\n",
+			overflow, overflow == 1 ? "byte" : "bytes"
+		);
+		return 1;
+	}
+	if (to + length > size) {
+		uint64_t overflow = to + length - size;
+		printf(
+			"Destination overflows by %" PRIu64 " %s\n",
+			overflow, overflow == 1 ? "byte" : "bytes"
+		);
+		return 1;
+	}
+	dest = (uint8_t*)file.data + to;
+	src = (uint8_t*)file.data + from;
+	memmove(dest, src, length);
 	return 0;
 }
 
@@ -492,6 +565,8 @@ static int parse(char *start)
 		return help(op);
 	case 'a':
 		return poke(op);
+	case 'c':
+		return copy(op);
 	case 'g':
 		bfile_showinfo(&file);
 		break;
