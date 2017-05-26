@@ -20,11 +20,12 @@
 static const char *help_editor =
 	"Line-based editor\n"
 	"Commands:\n"
-	"a start data...     Poke data\n"
-	"g                   Show file info\n"
-	"m start [length]    Dump memory\n"
-	"q                   Quit editor\n"
-	"t size              Truncate file";
+	"a start data...           Poke data\n"
+	"g                         Show file info\n"
+	"h start[,length] data...  Hunt data\n"
+	"m start [length]          Dump memory\n"
+	"q                         Quit editor\n"
+	"t size                    Truncate file";
 
 static const char *help_poke =
 	"a: start data...\n"
@@ -39,6 +40,13 @@ static const char *help_poke =
 static const char *help_showinfo =
 	"g: g\n"
 	"  Print file name and size in hexadecimal.";
+
+static const char *help_hunt =
+	"h: h start[,length] data...\n"
+	"  Find the first occurrence from START to START + LENGTH. If length is not\n"
+	"  specified, it will search till the end of file.\n"
+	"\n"
+	"  Nothing is returned if DATA could not be found.";
 
 static const char *help_peek =
 	"m: m start [length]\n"
@@ -233,6 +241,9 @@ static int help(const char *start)
 	case 'g':
 		puts(help_showinfo);
 		break;
+	case 'h':
+		puts(help_hunt);
+		break;
 	case 'm':
 		puts(help_peek);
 		break;
@@ -327,15 +338,96 @@ static int poke(char *start)
 			parse_address(token, &value, &mask);
 			bytes = byte_count(value);
 			switch (bytes) {
-			case 8: *((uint64_t*)dest) = (uint64_t)value; break;
-			case 4: *((uint32_t*)dest) = (uint32_t)value; break;
-			case 2: *((uint16_t*)dest) = (uint16_t)value; break;
-			case 1: *dest = (uint8_t)value; break;
+			case 8: *((uint64_t*)dest) = value; break;
+			case 4: *((uint32_t*)dest) = value; break;
+			case 2: *((uint16_t*)dest) = value; break;
+			case 1: *dest = value; break;
 			}
 			dest += bytes;
 		}
 	}
 	return 0;
+}
+
+static int hunt(char *start)
+{
+	char *token, *saveptr, *str, *opt_len;
+	uint8_t *data, hunt_buf[INPUT_BUFSZ], *hunt_ptr;
+	uint64_t addr, value, mask, length, size;
+	unsigned n = 0, bytes;
+	for (str = start, hunt_ptr = hunt_buf; ; str = NULL) {
+		token = strtok_r(str, SPACE_DELIM, &saveptr);
+		if (!token)
+			break;
+		switch (n++) {
+		case 0:
+			/* check for `,length' */
+			opt_len = strchr(token, ',');
+			if (opt_len)
+				*opt_len++ = '\0';
+			if (parse_address(token, &addr, &mask)) {
+				fputs("Bad address\n", stderr);
+				return 1;
+			}
+			if (!opt_len) {
+				length = addr > file.size ? 0 : file.size - addr;
+				continue;
+			}
+			if (parse_address(opt_len, &length, &mask)) {
+				fputs("Bad length\n", stderr);
+				return 1;
+			}
+			break;
+		default:
+			if (parse_address(token, &value, &mask)) {
+				fprintf(stderr, "Bad value: %s\n", token);
+				return 1;
+			}
+			bytes = byte_count(value);
+			switch (bytes) {
+			case 8: *((uint64_t*)hunt_ptr) = value; break;
+			case 4: *((uint32_t*)hunt_ptr) = value; break;
+			case 2: *((uint16_t*)hunt_ptr) = value; break;
+			case 1: *hunt_ptr = value; break;
+			}
+			hunt_ptr += bytes;
+			break;
+		}
+	}
+	if (n < 2) {
+		if (!n)
+			fputs("Missing address\n", stderr);
+		else
+			fputs("Missing data\n", stderr);
+		return 1;
+	}
+	size = file.size;
+	if (addr > size) {
+		uint64_t overflow = addr - size;
+		printf(
+			"Can't hunt: %" PRIu64 " %s behind file\n",
+			overflow, overflow == 1 ? "byte" : "bytes"
+		);
+		return 1;
+	}
+	if (addr + length > size) {
+		uint64_t overflow = addr + length - size;
+		printf(
+			"Hunt end marker overflows by %" PRIu64 " %s\n",
+			overflow, overflow == 1 ? "byte" : "bytes"
+		);
+		return 1;
+	}
+	n = hunt_ptr - hunt_buf;
+	if (addr + n > size)
+		goto not_found;
+	data = memmem((unsigned char*)file.data + addr, length, hunt_buf, n);
+	if (data) {
+		printf("%" PRIX64 "\n", (uint64_t)((unsigned char*)data - (unsigned char*)file.data));
+		return 0;
+	}
+not_found:
+	return 1;
 }
 
 static int peek(char *start)
@@ -403,6 +495,8 @@ static int parse(char *start)
 	case 'g':
 		bfile_showinfo(&file);
 		break;
+	case 'h':
+		return hunt(op);
 	case 'm':
 		return peek(op);
 	case 't':
