@@ -22,6 +22,7 @@ static const char *help_editor =
 	"Commands:\n"
 	"a start data...           Poke data\n"
 	"c dest src length         Copy data\n"
+	"f start length data...    Fill data\n"
 	"g                         Show file info\n"
 	"h start[,length] data...  Hunt data\n"
 	"m start [length]          Dump memory\n"
@@ -41,6 +42,11 @@ static const char *help_poke =
 static const char *help_copy =
 	"c: c dest src length\n"
 	"  Copy data from SRC to DEST. The areas may overlap.";
+
+static const char *help_fill =
+	"f: f start length data...\n"
+	"  Fill memory with DATA. The pattern is repeated up to LENGTH bytes which must\n"
+	"  be an exact multiple of the number of bytes specified by DATA.";
 
 static const char *help_showinfo =
 	"g: g\n"
@@ -246,6 +252,9 @@ static int help(const char *start)
 	case 'c':
 		puts(help_copy);
 		break;
+	case 'f':
+		puts(help_fill);
+		break;
 	case 'g':
 		puts(help_showinfo);
 		break;
@@ -422,6 +431,86 @@ static int copy(char *start)
 	return 0;
 }
 
+static int fill(char *start)
+{
+	char *token, *saveptr, *str;
+	uint8_t *dest, fill_buf[INPUT_BUFSZ], *fill_ptr;
+	uint64_t addr, length, value, mask, size;
+	unsigned n = 0, bytes;
+	for (str = start, fill_ptr = fill_buf; ; str = NULL) {
+		token = strtok_r(str, SPACE_DELIM, &saveptr);
+		if (!token)
+			break;
+		switch (n++) {
+		case 0:
+			if (parse_address(token, &addr, &mask)) {
+				fputs("Bad address\n", stderr);
+				return 1;
+			}
+			break;
+		case 1:
+			if (parse_address(token, &length, &mask)) {
+				fputs("Bad length\n", stderr);
+				return 1;
+			}
+			break;
+		default:
+			if (parse_address(token, &value, &mask)) {
+				fprintf(stderr, "Bad value: %s\n", token);
+				return 1;
+			}
+			bytes = byte_count(value);
+			switch (bytes) {
+			case 8: *((uint64_t*)fill_ptr) = value; break;
+			case 4: *((uint32_t*)fill_ptr) = value; break;
+			case 2: *((uint16_t*)fill_ptr) = value; break;
+			case 1: *fill_ptr = value; break;
+			}
+			fill_ptr += bytes;
+			break;
+		}
+	}
+	if (n < 3) {
+		switch (n) {
+		case 2:
+			fputs("Missing data\n", stderr);
+			break;
+		case 1:
+			fputs("Missing length\n", stderr);
+			break;
+		default:
+			fputs("Missing address\n", stderr);
+			break;
+		}
+		return 1;
+	}
+	n = fill_ptr - fill_buf;
+	if (length % n) {
+		fputs("Block is not multiple of length\n", stderr);
+		return 1;
+	}
+	size = file.size;
+	if (addr > size) {
+		uint64_t overflow = addr - size;
+		printf(
+			"Can't fill: %" PRIu64 " %s behind file\n",
+			overflow, overflow == 1 ? "byte" : "bytes"
+		);
+		return 1;
+	}
+	if (addr + length > size) {
+		uint64_t overflow = addr + length - size;
+		printf(
+			"Fill overflows by %" PRIu64 " %s\n",
+			overflow, overflow == 1 ? "byte" : "bytes"
+		);
+		return 1;
+	}
+	for (dest = (uint8_t*)file.data + addr; length; length -= n, dest += n)
+		memcpy(dest, fill_buf, n);
+	return 0;
+}
+
 static int hunt(char *start)
 {
 	char *token, *saveptr, *str, *opt_len;
@@ -567,6 +656,8 @@ static int parse(char *start)
 		return poke(op);
 	case 'c':
 		return copy(op);
+	case 'f':
+		return fill(op);
 	case 'g':
 		bfile_showinfo(&file);
 		break;
