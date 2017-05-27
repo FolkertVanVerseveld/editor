@@ -4,15 +4,11 @@
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/mman.h>
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
-
-#define BF_READONLY 1
-#define BF_ROWMAX 16
+#include "fs.h"
+#include "string.h"
 
 #define SPACE_DELIM " \f\n\r\t\v"
 #define INPUT_BUFSZ 256
@@ -73,62 +69,7 @@ static const char *help_truncate =
 	"  Resize file to SIZE and zero new data if resized file is bigger.";
 
 /* binary file */
-static struct bfile {
-	int fd;
-	mode_t mode;
-	unsigned flags;
-	void *data;
-	size_t size;
-	struct stat st;
-	const char *name;
-} file;
-
-static int bfile_open(struct bfile *f, const char *name, mode_t mode)
-{
-	int fd = -1, prot = PROT_READ;
-	unsigned flags = 0;
-	void *data;
-	size_t size;
-	fd = open(name, O_RDWR | O_CREAT, mode);
-	if (fd == -1) {
-		fd = open(name, O_RDONLY, mode);
-		if (fd == -1) {
-			fprintf(stderr, "Can't open %s: %s\n", name, strerror(errno));
-			return 1;
-		}
-		flags |= BF_READONLY;
-	}
-	if (fstat(fd, &f->st)) {
-		fprintf(stderr, "Can't access %s: %s\n", name, strerror(errno));
-		return 1;
-	}
-	if (!(flags & BF_READONLY))
-		prot |= PROT_WRITE;
-	data = mmap(NULL, size = f->st.st_size, prot, MAP_SHARED, fd, 0);
-	if (data == MAP_FAILED) {
-		fprintf(stderr, "Can't map %s: %s\n", name, strerror(errno));
-		return 1;
-	}
-	f->fd = fd;
-	f->flags = flags;
-	f->mode = mode;
-	f->name = name;
-	f->data = data;
-	f->size = size;
-	return 0;
-}
-
-static void bfile_close(struct bfile *f)
-{
-	if (f->data != MAP_FAILED) {
-		munmap(f->data, f->size);
-		f->data = MAP_FAILED;
-	}
-	if (f->fd != -1) {
-		close(f->fd);
-		f->fd = -1;
-	}
-}
+static struct bfile file;
 
 static void bfile_showinfo(const struct bfile *f)
 {
@@ -155,89 +96,6 @@ static void bfile_peek(const struct bfile *f, uint64_t start, unsigned length)
 	}
 	if (row_counter)
 		putchar('\n');
-}
-
-static int bfile_truncate(struct bfile *f, uint64_t size)
-{
-	if (file.flags & BF_READONLY) {
-		fputs("Can't truncate: readonly file\n", stderr);
-		return 1;
-	}
-	/* ignore if same */
-	if (file.size == size)
-		return 0;
-	if (ftruncate(f->fd, size)) {
-		fprintf(stderr, "Can't truncate: %s\n", strerror(errno));
-		return 1;
-	}
-	size_t oldsize = f->size;
-	/* mremap ensures that data is kept intact even if it has been moved */
-	void *map = mremap(f->data, f->size, size, MREMAP_MAYMOVE);
-	if (map == MAP_FAILED) {
-		fprintf(stderr, "Can't remap: %s\n", strerror(errno));
-		return 1;
-	}
-	/* update mapping */
-	f->data = map;
-	f->size = size;
-	if (msync(f->data, size, MS_SYNC)) {
-		/*
-		 * journaling may not be supported by the underlying filesystem
-		 * try to revert to old state
-		 */
-		void *oldmap = mremap(f->data, size, oldsize, MREMAP_MAYMOVE);
-		if (oldmap != MAP_FAILED) {
-			f->data = oldmap;
-			f->size = oldsize;
-			fprintf(stderr,
-				"Can't sync with file, journaling may be unsupported.\n"
-				"Filesystems that do not support journaling are e.g.: fat, ext, nfts\n"
-				"Sync error: %s\n",
-				strerror(errno)
-			);
-			return 1;
-		}
-		/* give up, something is terribly broken */
-		fprintf(stderr,
-			"Can't sync with file, I/O broken: %s\n"
-			"Going into readonly mode!\n",
-			strerror(errno)
-		);
-		f->flags |= BF_READONLY;
-		return 1;
-	}
-	if (fstat(f->fd, &f->st)) {
-		fprintf(stderr, "Can't access %s: %s\n", f->name, strerror(errno));
-		return 1;
-	}
-	return 0;
-}
-
-static int parse_address(const char *str, uint64_t *address, uint64_t *mask)
-{
-	const char *base_str = "0123456789ABCDEF";
-	unsigned base = 10;
-	if (!*str)
-		return 1;
-	const char *ptr = str;
-	uint64_t v = 0;
-	switch (*ptr) {
-	case '%': base =  2; ++ptr; break;
-	case 'o': base =  8; ++ptr; break;
-	case '$': base = 16; ++ptr; break;
-	}
-	*mask = 0;
-	for (; *ptr; ++ptr) {
-		v *= base;
-		*mask *= base;
-		const char *pos = strchr(base_str, toupper(*ptr));
-		if (!pos || pos >= base_str + base)
-			return 1;
-		v += (unsigned)(pos - base_str);
-		*mask += base - 1;
-	}
-	*address = v;
-	return 0;
 }
 
 static int help(const char *start)
@@ -675,15 +533,25 @@ static int parse(char *start)
 
 int main(int argc, char **argv)
 {
+	uint64_t size = 0, mask;
 	int ret;
 	char input[INPUT_BUFSZ];
 	if (argc != 2) {
-		fprintf(stderr, "usage: %s file\n", argc > 1 ? argv[0] : "editor");
+		if (argc != 3) {
+usage:
+			fprintf(stderr, "usage: %s file [size]\n", argc > 1 ? argv[0] : "editor");
+			return 1;
+		}
+		if (parse_address(argv[2], &size, &mask) || !size) {
+			fprintf(stderr, "Invalid filesize: %s\n", argv[2]);
+			goto usage;
+		}
+	}
+	ret = bfile_open(&file, argv[1], 0664, size);
+	if (ret) {
+		bfile_print_error(stderr, argv[1], ret);
 		return 1;
 	}
-	ret = bfile_open(&file, argv[1], 0664);
-	if (ret)
-		return ret;
 	while (fgets(input, sizeof input, stdin)) {
 		char *start, *last, *end;
 		/* trim input before processing ignoring all whitespace */
