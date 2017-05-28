@@ -45,7 +45,9 @@ struct bfile {
  */
 int bfile_open(struct bfile *f, const char *name, mode_t mode, uint64_t size);
 void bfile_close(struct bfile *f);
+void bfile_init(struct bfile *f);
 int bfile_truncate(struct bfile *f, uint64_t size);
 void bfile_print_error(FILE *f, const char *name, int code);
+int bfile_snprint_error(char *err, size_t errsz, int code);
 
 #endif

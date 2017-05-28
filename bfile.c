@@ -18,6 +18,13 @@ void bfile_close(struct bfile *f)
 	}
 }
 
+void bfile_init(struct bfile *f)
+{
+	f->fd = -1;
+	f->data = MAP_FAILED;
+	f->name = NULL;
+}
+
 void bfile_print_error(FILE *f, const char *name, int code)
 {
 	switch (code) {
@@ -58,11 +65,39 @@ void bfile_print_error(FILE *f, const char *name, int code)
 		);
 		break;
 	case BFE_RESIZE:
-		fputs("Truncating not permitted: file is non-empty\n", f);
+		fputs("Truncating not permitted: file non-empty\n", f);
 		break;
 	default:
 		fprintf(f, "Unknown error: %d\n", code);
 		break;
+	}
+}
+
+int bfile_snprint_error(char *err, size_t errsz, int code)
+{
+	switch (code) {
+	case BFE_SUCCESS:
+		return snprintf(err, errsz, "Success");
+	case BFE_OPEN:
+		return snprintf(err, errsz, "Can't open: %s", strerror(errno));
+	case BFE_ACCESS:
+		return snprintf(err, errsz, "Can't access: %s", strerror(errno));
+	case BFE_MAP:
+		return snprintf(err, errsz, "Can't map: %s", strerror(errno));
+	case BFE_EMPTY:
+		return snprintf(err, errsz, "File empty");
+	case BFE_READONLY:
+		return snprintf(err, errsz, "Operation not permitted: readonly file");
+	case BFE_TRUNCATE:
+		return snprintf(err, errsz, "Can't truncate: %s", strerror(errno));
+	case BFE_IO:
+		return snprintf(err, errsz, "I/O broken: %s", strerror(errno));
+	case BFE_SYNC:
+		return snprintf(err, errsz, "Sync error: %s", strerror(errno));
+	case BFE_RESIZE:
+		return snprintf(err, errsz, "Truncating not permitted: file non-empty");
+	default:
+		return snprintf(err, errsz, "Unknown error: %d", code);
 	}
 }
 
