@@ -1,0 +1,19 @@
+File editor tools
+
+Copyright Folkert van Verseveld
+
+Licensed under the General Public License version 2.
+
+For my hobby projects, it is essential to have a good file editor that
+manipulates arbitrary large files that is fast, robust and stable. The
+alternatives I've looked at had multiple problems that caused me to write this
+one myself:
+
+- preallocation of whole file in memory
+- unable to handle multiple number formats properly
+- fast file resizing
+
+The plain demo has a provided help that illustrates how to use the builtin
+commands. It provides error-checking, but some commands don't strictly check for
+correctness, which means you can append garbage and it will still consider it as
+a valid command. E.g.: `t 10 wut'
