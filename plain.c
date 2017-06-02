@@ -495,7 +495,10 @@ static int do_truncate(char *start)
 	char *arg;
 	for (arg = start; isspace(*arg); ++arg)
 		;
-	if (parse_address(arg, &size, &mask)) {
+	if (parse_address(arg, &size, &mask))
+		goto fail;
+	if (!size) {
+fail:
 		fputs("Bad filesize\n", stderr);
 		return 1;
 	}
