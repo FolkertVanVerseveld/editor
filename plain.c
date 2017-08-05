@@ -443,7 +443,7 @@ static int hunt(char *start)
 		goto not_found;
 	data = memmem((unsigned char*)file.data + addr, length, hunt_buf, n);
 	if (data) {
-		printf("%" PRIX64 "\n", (uint64_t)((unsigned char*)data - (unsigned char*)file.data));
+		printf("$%" PRIX64 "\n", (uint64_t)((unsigned char*)data - (unsigned char*)file.data));
 		return 0;
 	}
 not_found:
