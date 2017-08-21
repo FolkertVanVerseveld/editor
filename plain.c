@@ -1,4 +1,8 @@
+/* Copyright 2017 Folkert van Verseveld. See COPYING for details */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
+
 #include <errno.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -71,31 +75,13 @@ static const char *help_truncate =
 /* binary file */
 static struct bfile file;
 
-static void bfile_showinfo(const struct bfile *f)
+static int check_overflow(uint64_t pos, uint64_t max, const char *format)
 {
-	printf("%s, size: %zX\n", f->name, f->st.st_size);
-}
-
-static void bfile_peek(const struct bfile *f, uint64_t start, unsigned length)
-{
-	unsigned row_counter = 0;
-	const uint8_t *map = f->data;
-	for (; length && start < f->size; ++start, --length) {
-		printf(" %02" PRIX8, map[start]);
-		if (++row_counter == BF_ROWMAX) {
-			row_counter = 0;
-			putchar('\n');
-		}
-	}
-	for (; length; ++start, --length) {
-		fputs(" ~~", stdout);
-		if (++row_counter == BF_ROWMAX) {
-			row_counter = 0;
-			putchar('\n');
-		}
-	}
-	if (row_counter)
-		putchar('\n');
+	if (pos < max)
+		return 0;
+	uint64_t overflow = pos - max + 1;
+	printf(format, overflow, overflow == 1 ? "byte" : "bytes");
+	return 1;
 }
 
 static int help(const char *start)
@@ -152,10 +138,9 @@ static int poke(char *start)
 	uint8_t *dest;
 	uint64_t addr, value, mask, size;
 	unsigned n = 0;
-	if (file.flags & BF_READONLY) {
-		fputs("Can't poke: readonly file\n", stderr);
+
+	if (!bfile_is_rdwr2(&file, "poke"))
 		return 1;
-	}
 	strcpy(copy, start);
 	/* first pass */
 	for (str = copy; ; str = NULL) {
@@ -186,23 +171,13 @@ static int poke(char *start)
 		return 1;
 	}
 	--n;
-	size = file.size;
-	if (addr > size) {
-		uint64_t overflow = addr - size;
-		printf(
-			"Can't poke: %" PRIu64 " %s behind file\n",
-			overflow, overflow == 1 ? "byte" : "bytes"
-		);
+	size = bfile_size(&file);
+
+	if (check_overflow(addr, size, "Can't poke: %" PRIu64 " %s behind file\n"))
 		return 1;
-	}
-	if (addr + n > size) {
-		uint64_t overflow = addr + n - size;
-		printf(
-			"Poke overflows by %" PRIu64 " %s\n",
-			overflow, overflow == 1 ? "byte" : "bytes"
-		);
+	if (check_overflow(addr + n - 1, size, "Poke overflows by %" PRIu64 " %s\n"))
 		return 1;
-	}
+
 	/* second pass */
 	for (dest = (uint8_t*)file.data + addr, str = start, n = 0; ; str = NULL) {
 		token = strtok_r(str, SPACE_DELIM, &saveptr);
@@ -227,7 +202,6 @@ static int poke(char *start)
 static int copy(char *start)
 {
 	char *token, *saveptr, *str;
-	uint8_t *dest, *src;
 	uint64_t from, to, mask, length, size;
 	unsigned n = 0;
 	for (str = start; ; str = NULL) {
@@ -266,26 +240,17 @@ static int copy(char *start)
 		}
 		return 1;
 	}
-	size = file.size;
-	if (from + length > size) {
-		uint64_t overflow = from + length - size;
-		printf(
-			"Source overflows by %" PRIu64 " %s\n",
-			overflow, overflow == 1 ? "byte" : "bytes"
-		);
+	size = bfile_size(&file);
+
+	if (!length)
+		return 0;
+
+	if (check_overflow(from + length - 1, size, "Source overflows by %" PRIu64 " %s\n"))
 		return 1;
-	}
-	if (to + length > size) {
-		uint64_t overflow = to + length - size;
-		printf(
-			"Destination overflows by %" PRIu64 " %s\n",
-			overflow, overflow == 1 ? "byte" : "bytes"
-		);
+	if (check_overflow(to + length - 1, size, "Destination overflows by %" PRIu64 " %s\n"))
 		return 1;
-	}
-	dest = (uint8_t*)file.data + to;
-	src = (uint8_t*)file.data + from;
-	memmove(dest, src, length);
+
+	memmove((uint8_t*)file.data + to, (uint8_t*)file.data + from, length);
 	return 0;
 }
 
@@ -347,23 +312,17 @@ static int fill(char *start)
 		fputs("Block is not multiple of length\n", stderr);
 		return 1;
 	}
-	size = file.size;
-	if (addr > size) {
-		uint64_t overflow = addr - size;
-		printf(
-			"Can't fill: %" PRIu64 " %s behind file\n",
-			overflow, overflow == 1 ? "byte" : "bytes"
-		);
+	size = bfile_size(&file);
+	if (!size) {
+		fputs("File empty\n", stderr);
 		return 1;
 	}
-	if (addr + length > size) {
-		uint64_t overflow = addr + length - size;
-		printf(
-			"Fill overflows by %" PRIu64 " %s\n",
-			overflow, overflow == 1 ? "byte" : "bytes"
-		);
+
+	if (check_overflow(addr, size, "Can't fill: %" PRIu64 " %s behind file\n"))
 		return 1;
-	}
+	if (check_overflow(addr + length - 1, size, "Fill overflows by %" PRIu64 " %s\n"))
+		return 1;
+
 	for (dest = (uint8_t*)file.data + addr; length; length -= n, dest += n)
 		memcpy(dest, fill_buf, n);
 	return 0;
@@ -387,21 +346,21 @@ static int hunt(char *start)
 				*opt_len++ = '\0';
 			if (parse_address(token, &addr, &mask)) {
 				fputs("Bad address\n", stderr);
-				return 1;
+				goto not_found;
 			}
 			if (!opt_len) {
-				length = addr > file.size ? 0 : file.size - addr;
+				length = addr > bfile_size(&file) ? 0 : bfile_size(&file) - addr;
 				continue;
 			}
 			if (parse_address(opt_len, &length, &mask)) {
 				fputs("Bad length\n", stderr);
-				return 1;
+				goto not_found;
 			}
 			break;
 		default:
 			if (parse_address(token, &value, &mask)) {
 				fprintf(stderr, "Bad value: %s\n", token);
-				return 1;
+				goto not_found;
 			}
 			bytes = byte_count(value);
 			switch (bytes) {
@@ -419,28 +378,19 @@ static int hunt(char *start)
 			fputs("Missing address\n", stderr);
 		else
 			fputs("Missing data\n", stderr);
-		return 1;
+		goto not_found;
 	}
-	size = file.size;
-	if (addr > size) {
-		uint64_t overflow = addr - size;
-		printf(
-			"Can't hunt: %" PRIu64 " %s behind file\n",
-			overflow, overflow == 1 ? "byte" : "bytes"
-		);
-		return 1;
-	}
-	if (addr + length > size) {
-		uint64_t overflow = addr + length - size;
-		printf(
-			"Hunt end marker overflows by %" PRIu64 " %s\n",
-			overflow, overflow == 1 ? "byte" : "bytes"
-		);
-		return 1;
-	}
+	size = bfile_size(&file);
+
+	if (check_overflow(addr, size, "Can't hunt: %" PRIu64 " %s behind file\n"))
+		goto not_found;
+	if (check_overflow(addr + length - 1, size, "Hunt end marker overflows by %" PRIu64 " %s\n"))
+		goto not_found;
+
 	n = hunt_ptr - hunt_buf;
 	if (addr + n > size)
 		goto not_found;
+
 	data = memmem((unsigned char*)file.data + addr, length, hunt_buf, n);
 	if (data) {
 		printf("$%" PRIX64 "\n", (uint64_t)((unsigned char*)data - (unsigned char*)file.data));
@@ -492,13 +442,7 @@ static int peek(char *start)
 static int do_truncate(char *start)
 {
 	uint64_t size, mask;
-	char *arg;
-	for (arg = start; isspace(*arg); ++arg)
-		;
-	if (parse_address(arg, &size, &mask))
-		goto fail;
-	if (!size) {
-fail:
+	if (parse_address(start, &size, &mask) || !size) {
 		fputs("Bad filesize\n", stderr);
 		return 1;
 	}
@@ -556,20 +500,11 @@ usage:
 		return 1;
 	}
 	while (fgets(input, sizeof input, stdin)) {
-		char *start, *last, *end;
-		/* trim input before processing ignoring all whitespace */
-		for (start = input; isspace(*start); ++start)
-			;
-		for (end = start; *end; ++end)
-			;
-		for (last = end; last > start; --last)
-			if (!isspace(last[-1]))
-				break;
-		*last = '\0';
-		if (*start == 'q' && !start[1])
+		str_trim(input);
+		if (!strcmp("q", input))
 			break;
-		if (parse(start) < 0)
-			fprintf(stderr, "? %s\n", start);
+		if (parse(input) < 0)
+			fprintf(stderr, "? %s\n", input);
 	}
 	bfile_close(&file);
 	return 0;

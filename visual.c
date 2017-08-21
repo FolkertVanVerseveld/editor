@@ -1,3 +1,4 @@
+/* Copyright 2017 Folkert van Verseveld. See COPYING for details */
 #include <assert.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -51,7 +52,7 @@ static int view_start(struct view *v)
 
 static void view_goto(struct view *v, size_t pos)
 {
-	size_t max = file.size - 1;
+	size_t max = bfile_size(&file) - 1;
 	if (pos > max)
 		pos = max;
 	v->pos = pos;
@@ -60,7 +61,7 @@ static void view_goto(struct view *v, size_t pos)
 
 static void view_move(struct view *v, long pos)
 {
-	size_t max = file.size;
+	size_t max = bfile_size(&file);
 	if (pos < 0) {
 		if ((unsigned long)-pos > v->pos)
 			return;
@@ -75,8 +76,8 @@ static void view_goto_curs(struct view *v, long gpos)
 	if (gpos > 0) {
 		if (gpos > pagesize - 1)
 			gpos = pagesize - 1;
-		if (v->pos + gpos > file.size - 1)
-			gpos = file.size - v->pos - 1;
+		if (v->pos + gpos > bfile_size(&file) - 1)
+			gpos = bfile_size(&file) - v->pos - 1;
 	}
 	if (gpos < 0)
 		gpos = 0;
@@ -116,7 +117,7 @@ static void view_draw_data(struct view *v, int left, int right, int top, int bot
 	v->grid.pagesize = v->grid.width * v->grid.height;
 	data = (const uint8_t*)file.data;
 	move(top, left);
-	for (pos = v->pos, end = file.size, y = top, x = left; pos < end; ++pos) {
+	for (pos = v->pos, end = bfile_size(&file), y = top, x = left; pos < end; ++pos) {
 		uint8_t ch = data[pos];
 		addch(HEX[(ch >> 4)]);
 		addch(HEX[ ch & 0xf]);
@@ -263,8 +264,8 @@ static int view_main(struct view *v)
 			view_goto(v, 0);
 			break;
 		case KEY_END:
-			if (v->grid.pagesize <= file.size)
-				view_goto(v, file.size - v->grid.pagesize);
+			if (v->grid.pagesize <= bfile_size(&file))
+				view_goto(v, bfile_size(&file) - v->grid.pagesize);
 			break;
 		case 'k':
 			view_move_curs(v, -(long)v->grid.width);

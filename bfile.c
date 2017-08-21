@@ -1,15 +1,21 @@
+/* Copyright 2017 Folkert van Verseveld. See COPYING for details */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
+
 #include <errno.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <inttypes.h>
+
 #include "fs.h"
 
 void bfile_close(struct bfile *f)
 {
 	if (f->data != MAP_FAILED) {
-		munmap(f->data, f->size);
+		munmap(f->data, bfile_size(f));
 		f->data = MAP_FAILED;
 	}
 	if (f->fd != -1) {
@@ -23,6 +29,11 @@ void bfile_init(struct bfile *f)
 	f->fd = -1;
 	f->data = MAP_FAILED;
 	f->name = NULL;
+}
+
+size_t bfile_size(const struct bfile *f)
+{
+	return f->st.st_size;
 }
 
 void bfile_print_error(FILE *f, const char *name, int code)
@@ -171,7 +182,6 @@ resize:
 	f->mode = mode;
 	f->name = name;
 	f->data = data;
-	f->size = size;
 	err = 0;
 fail:
 	if (err) {
@@ -188,18 +198,17 @@ int bfile_truncate(struct bfile *f, uint64_t size)
 	if (f->flags & BF_READONLY)
 		return BFE_READONLY;
 	/* ignore if same */
-	if (f->size == size)
+	if (bfile_size(f) == size)
 		return 0;
 	if (ftruncate(f->fd, size))
 		return BFE_TRUNCATE;
-	size_t oldsize = f->size;
+	size_t oldsize = bfile_size(f);
 	/* mremap ensures that data is kept intact even if it has been moved */
-	void *map = mremap(f->data, f->size, size, MREMAP_MAYMOVE);
+	void *map = mremap(f->data, bfile_size(f), size, MREMAP_MAYMOVE);
 	if (map == MAP_FAILED)
 		return BFE_MAP;
 	/* update mapping */
 	f->data = map;
-	f->size = size;
 	if (msync(f->data, size, MS_SYNC)) {
 		/*
 		 * journaling may not be supported by the underlying filesystem
@@ -208,7 +217,6 @@ int bfile_truncate(struct bfile *f, uint64_t size)
 		void *oldmap = mremap(f->data, size, oldsize, MREMAP_MAYMOVE);
 		if (oldmap != MAP_FAILED) {
 			f->data = oldmap;
-			f->size = oldsize;
 			return BFE_SYNC;
 		}
 		/* give up, something is terribly broken */
@@ -218,4 +226,48 @@ int bfile_truncate(struct bfile *f, uint64_t size)
 	if (fstat(f->fd, &f->st))
 		return BFE_ACCESS;
 	return 0;
+}
+
+int bfile_is_rdwr(const struct bfile *f)
+{
+	return (f->flags & BF_READONLY) == 0;
+}
+
+int bfile_is_rdwr2(const struct bfile *f, const char *op)
+{
+	if (!bfile_is_rdwr(f)) {
+		fprintf(stderr, "Can't %s: readonly file\n", op);
+		return 0;
+	}
+	return 1;
+}
+
+void bfile_showinfo(const struct bfile *f)
+{
+	const char *format = "%s, size: $%zX\n";
+	if (!bfile_is_rdwr(f))
+		format = "%s, size: $%zX (readonly)\n";
+	printf(format, f->name, bfile_size(f));
+}
+
+void bfile_peek(const struct bfile *f, uint64_t start, unsigned length)
+{
+	unsigned row_counter = 0;
+	const uint8_t *map = f->data;
+	for (; length && start < bfile_size(f); ++start, --length) {
+		printf(" %02" PRIX8, map[start]);
+		if (++row_counter == BF_ROWMAX) {
+			row_counter = 0;
+			putchar('\n');
+		}
+	}
+	for (; length; ++start, --length) {
+		fputs(" ~~", stdout);
+		if (++row_counter == BF_ROWMAX) {
+			row_counter = 0;
+			putchar('\n');
+		}
+	}
+	if (row_counter)
+		putchar('\n');
 }

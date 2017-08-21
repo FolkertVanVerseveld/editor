@@ -1,3 +1,4 @@
+/* Copyright 2017 Folkert van Verseveld. See COPYING for details */
 #include "string.h"
 #include <ctype.h>
 #include <string.h>
@@ -27,4 +28,19 @@ int parse_address(const char *str, uint64_t *address, uint64_t *mask)
 	}
 	*address = v;
 	return 0;
+}
+
+char *str_trim(char *str)
+{
+	char *start, *end;
+	for (start = str; ; ++start)
+		if (!isspace(*start))
+			break;
+	for (end = start + strlen(start); end > start; --end)
+		if (!isspace(end[-1]))
+			break;
+	memmove(str, start, end - start);
+	end -= start - str;
+	*end = '\0';
+	return str;
 }

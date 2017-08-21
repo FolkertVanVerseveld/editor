@@ -1,3 +1,4 @@
+/* Copyright 2017 Folkert van Verseveld. See COPYING for details */
 #ifndef FS_H
 #define FS_H
 
@@ -12,7 +13,6 @@ struct bfile {
 	mode_t mode;
 	unsigned flags;
 	void *data;
-	size_t size;
 	struct stat st;
 	const char *name;
 };
@@ -33,6 +33,7 @@ struct bfile {
 #define BFE_SYNC     8
 #define BFE_RESIZE   9
 
+void bfile_init(struct bfile *f);
 /*
  * open a binary file for editing. if SIZE is non-zero, it is implied that the
  * file must be either:
@@ -45,9 +46,17 @@ struct bfile {
  */
 int bfile_open(struct bfile *f, const char *name, mode_t mode, uint64_t size);
 void bfile_close(struct bfile *f);
-void bfile_init(struct bfile *f);
+
+size_t bfile_size(const struct bfile *f);
+/* operations */
 int bfile_truncate(struct bfile *f, uint64_t size);
+void bfile_showinfo(const struct bfile *f);
+void bfile_peek(const struct bfile *f, uint64_t start, unsigned length);
+/* error handling */
 void bfile_print_error(FILE *f, const char *name, int code);
 int bfile_snprint_error(char *err, size_t errsz, int code);
+/* check whether the file is readable and writeable */
+int bfile_is_rdwr(const struct bfile *f);
+int bfile_is_rdwr2(const struct bfile *f, const char *op);
 
 #endif
