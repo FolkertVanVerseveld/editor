@@ -86,37 +86,26 @@ static int check_overflow(uint64_t pos, uint64_t max, const char *format)
 
 static int help(const char *start)
 {
-	switch (*start) {
-	case '\0':
+	if (!*start)
 		puts(help_editor);
-		break;
-	case 'a':
+	else if (!strcmp(start, "a"))
 		puts(help_poke);
-		break;
-	case 'c':
+	else if (!strcmp(start, "c"))
 		puts(help_copy);
-		break;
-	case 'f':
+	else if (!strcmp(start, "f"))
 		puts(help_fill);
-		break;
-	case 'g':
+	else if (!strcmp(start, "g"))
 		puts(help_showinfo);
-		break;
-	case 'h':
+	else if (!strcmp(start, "h"))
 		puts(help_hunt);
-		break;
-	case 'm':
+	else if (!strcmp(start, "m"))
 		puts(help_peek);
-		break;
-	case 'q':
+	else if (!strcmp(start, "q"))
 		puts(help_quit);
-		break;
-	case 't':
+	else if (!strcmp(start, "t"))
 		puts(help_truncate);
-		break;
-	default:
+	else
 		return -1;
-	}
 	return 0;
 }
 
@@ -141,6 +130,9 @@ static int poke(char *start)
 
 	if (!bfile_is_rdwr2(&file, "poke"))
 		return 1;
+	if (bfile_map(&file))
+		return 1;
+
 	strcpy(copy, start);
 	/* first pass */
 	for (str = copy; ; str = NULL) {
@@ -260,6 +252,15 @@ static int fill(char *start)
 	uint8_t *dest, fill_buf[INPUT_BUFSZ], *fill_ptr;
 	uint64_t addr, length, value, mask, size;
 	unsigned n = 0, bytes;
+
+	size = bfile_size(&file);
+	if (!size) {
+		fputs("File empty\n", stderr);
+		return 1;
+	}
+	if (!bfile_is_rdwr2(&file, "fill") || bfile_map(&file))
+		return 1;
+
 	for (str = start, fill_ptr = fill_buf; ; str = NULL) {
 		token = strtok_r(str, SPACE_DELIM, &saveptr);
 		if (!token)
@@ -312,11 +313,6 @@ static int fill(char *start)
 		fputs("Block is not multiple of length\n", stderr);
 		return 1;
 	}
-	size = bfile_size(&file);
-	if (!size) {
-		fputs("File empty\n", stderr);
-		return 1;
-	}
 
 	if (check_overflow(addr, size, "Can't fill: %" PRIu64 " %s behind file\n"))
 		return 1;
@@ -334,6 +330,10 @@ static int hunt(char *start)
 	uint8_t *data, hunt_buf[INPUT_BUFSZ], *hunt_ptr;
 	uint64_t addr, value, mask, length, size;
 	unsigned n = 0, bytes;
+
+	if (bfile_map(&file))
+		return 1;
+
 	for (str = start, hunt_ptr = hunt_buf; ; str = NULL) {
 		token = strtok_r(str, SPACE_DELIM, &saveptr);
 		if (!token)
@@ -405,6 +405,10 @@ static int peek(char *start)
 	char *token, *saveptr, *str;
 	unsigned n = 0;
 	uint64_t addr, length = 16, mask;
+
+	if (bfile_map(&file))
+		return 1;
+
 	for (str = start; ; str = NULL) {
 		token = strtok_r(str, SPACE_DELIM, &saveptr);
 		if (!token)
@@ -439,10 +443,10 @@ static int peek(char *start)
 	return 0;
 }
 
-static int do_truncate(char *start)
+static int do_truncate(const char *start)
 {
 	uint64_t size, mask;
-	if (parse_address(start, &size, &mask) || !size) {
+	if (!start || parse_address(start, &size, &mask)) {
 		fputs("Bad filesize\n", stderr);
 		return 1;
 	}
@@ -471,7 +475,7 @@ static int parse(char *start)
 	case 'm':
 		return peek(op);
 	case 't':
-		return do_truncate(op);
+		return do_truncate(cmd_next_arg(start));
 	default:
 		return -1;
 	}
@@ -480,21 +484,13 @@ static int parse(char *start)
 
 int main(int argc, char **argv)
 {
-	uint64_t size = 0, mask;
 	int ret;
 	char input[INPUT_BUFSZ];
 	if (argc != 2) {
-		if (argc != 3) {
-usage:
-			fprintf(stderr, "usage: %s file [size]\n", argc > 1 ? argv[0] : "editor");
-			return 1;
-		}
-		if (parse_address(argv[2], &size, &mask) || !size) {
-			fprintf(stderr, "Invalid filesize: %s\n", argv[2]);
-			goto usage;
-		}
+		fprintf(stderr, "usage: %s file\n", argc > 1 ? argv[0] : "editor");
+		return 1;
 	}
-	ret = bfile_open(&file, argv[1], 0664, size);
+	ret = bfile_open(&file, argv[1], 0664);
 	if (ret) {
 		bfile_print_error(stderr, argv[1], ret);
 		return 1;

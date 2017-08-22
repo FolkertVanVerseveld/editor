@@ -15,6 +15,7 @@ struct bfile {
 	void *data;
 	struct stat st;
 	const char *name;
+	int prot;
 };
 
 #define BF_READONLY 1
@@ -35,16 +36,12 @@ struct bfile {
 
 void bfile_init(struct bfile *f);
 /*
- * open a binary file for editing. if SIZE is non-zero, it is implied that the
- * file must be either:
- * - created exclusively and truncated to that size.
- * - empty when it is opened and truncated to that size.
+ * open a binary file for editing.
  *
- * the specified MODE determines the permissions for the created file. if SIZE
- * is zero, the specified name must exist. if MODE is zero, the file is opened
- * in readonly mode.
+ * the specified MODE determines the permissions for the created file. if MODE
+ * is zero, the file is opened in readonly mode.
  */
-int bfile_open(struct bfile *f, const char *name, mode_t mode, uint64_t size);
+int bfile_open(struct bfile *f, const char *name, mode_t mode);
 void bfile_close(struct bfile *f);
 
 size_t bfile_size(const struct bfile *f);
@@ -54,9 +51,11 @@ void bfile_showinfo(const struct bfile *f);
 void bfile_peek(const struct bfile *f, uint64_t start, unsigned length);
 /* error handling */
 void bfile_print_error(FILE *f, const char *name, int code);
-int bfile_snprint_error(char *err, size_t errsz, int code);
+int bfile_snprint_error(char *str, size_t size, int code);
 /* check whether the file is readable and writeable */
 int bfile_is_rdwr(const struct bfile *f);
 int bfile_is_rdwr2(const struct bfile *f, const char *op);
+/* open mapping if not open */
+int bfile_map(struct bfile *f);
 
 #endif

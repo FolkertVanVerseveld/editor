@@ -305,23 +305,14 @@ static void view_close(struct view *v)
 
 int main(int argc, char **argv)
 {
-	uint64_t size = 0, mask;
-	int ret;
+	int ret = 1;
 	bfile_init(&file);
 	view_init(&view);
 	if (argc != 2) {
-		if (argc != 3) {
-usage:
-			fprintf(stderr, "usage: %s file [size]\n", argc > 1 ? argv[0] : "editor");
-			ret = 1;
-			goto fail;
-		}
-		if (parse_address(argv[2], &size, &mask) || !size) {
-			fprintf(stderr, "Invalid filesize: %s\n", argv[2]);
-			goto usage;
-		}
+		fprintf(stderr, "usage: %s file\n", argc > 1 ? argv[0] : "editor");
+		goto fail;
 	}
-	ret = bfile_open(&file, argv[1], 0664, size);
+	ret = bfile_open(&file, argv[1], 0664);
 	if (ret) {
 		bfile_print_error(stderr, argv[1], ret);
 		return 1;

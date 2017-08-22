@@ -12,23 +12,20 @@
 
 #include "fs.h"
 
-void bfile_close(struct bfile *f)
-{
-	if (f->data != MAP_FAILED) {
-		munmap(f->data, bfile_size(f));
-		f->data = MAP_FAILED;
-	}
-	if (f->fd != -1) {
-		close(f->fd);
-		f->fd = -1;
-	}
-}
-
 void bfile_init(struct bfile *f)
 {
 	f->fd = -1;
 	f->data = MAP_FAILED;
 	f->name = NULL;
+}
+
+void bfile_close(struct bfile *f)
+{
+	if (f->data != MAP_FAILED)
+		munmap(f->data, bfile_size(f));
+	if (f->fd != -1)
+		close(f->fd);
+	bfile_init(f);
 }
 
 size_t bfile_size(const struct bfile *f)
@@ -84,43 +81,40 @@ void bfile_print_error(FILE *f, const char *name, int code)
 	}
 }
 
-int bfile_snprint_error(char *err, size_t errsz, int code)
+int bfile_snprint_error(char *str, size_t size, int code)
 {
 	switch (code) {
 	case BFE_SUCCESS:
-		return snprintf(err, errsz, "Success");
+		return snprintf(str, size, "Success");
 	case BFE_OPEN:
-		return snprintf(err, errsz, "Can't open: %s", strerror(errno));
+		return snprintf(str, size, "Can't open: %s", strerror(errno));
 	case BFE_ACCESS:
-		return snprintf(err, errsz, "Can't access: %s", strerror(errno));
+		return snprintf(str, size, "Can't access: %s", strerror(errno));
 	case BFE_MAP:
-		return snprintf(err, errsz, "Can't map: %s", strerror(errno));
+		return snprintf(str, size, "Can't map: %s", strerror(errno));
 	case BFE_EMPTY:
-		return snprintf(err, errsz, "File empty");
+		return snprintf(str, size, "File empty");
 	case BFE_READONLY:
-		return snprintf(err, errsz, "Operation not permitted: readonly file");
+		return snprintf(str, size, "Operation not permitted: readonly file");
 	case BFE_TRUNCATE:
-		return snprintf(err, errsz, "Can't truncate: %s", strerror(errno));
+		return snprintf(str, size, "Can't truncate: %s", strerror(errno));
 	case BFE_IO:
-		return snprintf(err, errsz, "I/O broken: %s", strerror(errno));
+		return snprintf(str, size, "I/O broken: %s", strerror(errno));
 	case BFE_SYNC:
-		return snprintf(err, errsz, "Sync error: %s", strerror(errno));
+		return snprintf(str, size, "Sync error: %s", strerror(errno));
 	case BFE_RESIZE:
-		return snprintf(err, errsz, "Truncating not permitted: file non-empty");
+		return snprintf(str, size, "Truncating not permitted: file non-empty");
 	default:
-		return snprintf(err, errsz, "Unknown error: %d", code);
+		return snprintf(str, size, "Unknown error: %d", code);
 	}
 }
 
-int bfile_open(struct bfile *f, const char *name, mode_t mode, uint64_t fsize)
+int bfile_open(struct bfile *f, const char *name, mode_t mode)
 {
-	int err = 0, fd = -1, prot = PROT_READ;
-	int oflags = O_RDWR, excl = 0;
+	int err = 0, fd = -1, prot = PROT_READ, oflags = O_RDWR, new = 0;
 	unsigned flags = 0;
-	void *data;
+	void *data = MAP_FAILED;
 	size_t size;
-	if (fsize)
-		oflags |= O_CREAT | O_EXCL;
 	if (!mode) {
 		oflags = O_RDONLY;
 		flags |= BF_READONLY;
@@ -131,61 +125,48 @@ int bfile_open(struct bfile *f, const char *name, mode_t mode, uint64_t fsize)
 			err = BFE_OPEN;
 			goto fail;
 		}
-		if (fsize) {
-			fd = open(name, O_RDWR, mode);
+		fd = open(name, O_RDONLY, mode);
+		if (fd == -1) {
+			/*
+			 * Permission denied or file does not exist.
+			 * Try to create it or give up.
+			 */
+			if (!mode)
+				goto err_open;
+			fd = open(name, O_CREAT | O_EXCL | O_RDWR, mode);
 			if (fd == -1) {
+err_open:
 				err = BFE_OPEN;
 				goto fail;
 			}
-			if (fstat(fd, &f->st)) {
-				err = BFE_ACCESS;
-				goto fail;
-			}
-			if (f->st.st_size) {
-				err = BFE_RESIZE;
-				goto fail;
-			}
-			goto resize;
-		}
-		fd = open(name, O_RDONLY, mode);
-		if (fd == -1) {
-			err = BFE_OPEN;
-			goto fail;
-		}
-		flags |= BF_READONLY;
-	}
-	if (mode && fsize)
-		excl = 1;
-resize:
-	/* resize file if it has been created or if the file is empty */
-	if (mode && fsize && ftruncate(fd, fsize)) {
-		err = BFE_TRUNCATE;
-		goto fail;
+			new = 1;
+		} else
+			flags |= BF_READONLY;
 	}
 	if (fstat(fd, &f->st)) {
 		err = BFE_ACCESS;
 		goto fail;
 	}
-	if (!f->st.st_size) {
-		err = BFE_EMPTY;
-		goto fail;
-	}
 	if (!(flags & BF_READONLY))
 		prot |= PROT_WRITE;
-	data = mmap(NULL, size = f->st.st_size, prot, MAP_SHARED, fd, 0);
-	if (data == MAP_FAILED) {
-		err = BFE_MAP;
-		goto fail;
+	if (f->st.st_size) {
+		data = mmap(NULL, size = f->st.st_size, prot, MAP_SHARED, fd, 0);
+		if (data == MAP_FAILED) {
+			err = BFE_MAP;
+			goto fail;
+		}
 	}
+	/* opening successful, apply settings */
 	f->fd = fd;
 	f->flags = flags;
 	f->mode = mode;
 	f->name = name;
 	f->data = data;
+	f->prot = prot;
 	err = 0;
 fail:
 	if (err) {
-		if (excl && fd != -1)
+		if (new && fd != -1)
 			unlink(name);
 		if (fd != -1)
 			close(fd);
@@ -203,8 +184,15 @@ int bfile_truncate(struct bfile *f, uint64_t size)
 	if (ftruncate(f->fd, size))
 		return BFE_TRUNCATE;
 	size_t oldsize = bfile_size(f);
+	/* close mapping if new size is 0 because mremap and mmap can't handle this */
+	if (!size) {
+		munmap(f->data, oldsize);
+		f->data = MAP_FAILED;
+		goto update_stat;
+	}
 	/* mremap ensures that data is kept intact even if it has been moved */
-	void *map = mremap(f->data, bfile_size(f), size, MREMAP_MAYMOVE);
+	void *map = oldsize ? mremap(f->data, bfile_size(f), size, MREMAP_MAYMOVE)
+		: mmap(NULL, size, f->prot, MAP_SHARED, f->fd, 0);
 	if (map == MAP_FAILED)
 		return BFE_MAP;
 	/* update mapping */
@@ -223,6 +211,7 @@ int bfile_truncate(struct bfile *f, uint64_t size)
 		f->flags |= BF_READONLY;
 		return BFE_IO;
 	}
+update_stat:
 	if (fstat(f->fd, &f->st))
 		return BFE_ACCESS;
 	return 0;
@@ -270,4 +259,19 @@ void bfile_peek(const struct bfile *f, uint64_t start, unsigned length)
 	}
 	if (row_counter)
 		putchar('\n');
+}
+
+int bfile_map(struct bfile *f)
+{
+	if (!bfile_size(f)) {
+		fputs("File empty\n", stderr);
+		return 1;
+	}
+	void *map = mmap(NULL, bfile_size(f), f->prot, MAP_SHARED, f->fd, 0);
+	if (map == MAP_FAILED) {
+		perror("Can't map file data");
+		return 1;
+	}
+	f->data = map;
+	return 0;
 }

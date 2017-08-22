@@ -6,5 +6,6 @@
 
 int parse_address(const char *str, uint64_t *address, uint64_t *mask);
 char *str_trim(char *str);
+char *cmd_next_arg(const char *str);
 
 #endif

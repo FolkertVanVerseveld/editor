@@ -44,3 +44,13 @@ char *str_trim(char *str)
 	*end = '\0';
 	return str;
 }
+
+char *cmd_next_arg(const char *str)
+{
+	const unsigned char *ptr = (const unsigned char*)str;
+	while (*ptr && !isspace(*ptr))
+		++ptr;
+	while (*ptr && isspace(*ptr))
+		++ptr;
+	return *ptr ? (char*)ptr : NULL;
+}
